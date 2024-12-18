@@ -33,7 +33,7 @@ var_signal <- c(var_signal, var(signal))
 var_Y <- c(var_Y, var(Y))
 }
 
-# Mean signal-to-noise ratio of 50 simulations, all with 10 million observations
+# Mean signal-to-noise ratio of 30 simulations, all with 10 million observations
 cat("Variance breakdown:\n")
 cat(sprintf("Noise (epsilon): %.3f\n", mean(var_noise)))
 cat(sprintf("Total Signal Variance: %.3f\n", mean(var_signal)))
