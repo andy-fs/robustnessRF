@@ -1,0 +1,1628 @@
+---
+title: "Main code for bsc. thesis"
+author: "Andy Slettenhaar"
+date: "2024-10-09"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Install libraries
+```{r eval=FALSE, include=FALSE}
+install.packages("ggplot2")
+install.packages("GGally")
+install.packages("dplyr")
+install.packages("data.tree")
+install.packages("foreach")
+install.packages("doParallel")
+install.packages("profvis")
+
+
+tinytex::tlmgr_install("bookmark")
+tinytex::reinstall_tinytex(repository = "illinois")
+```
+
+```{r warning=FALSE}
+library(ggplot2)
+library(GGally)
+library(dplyr)
+library(data.tree)
+library(foreach)
+library(doParallel)
+library(profvis)
+```
+
+```{r}
+citation()
+citation("ggplot2")
+citation("GGally")
+citation("dplyr")
+citation("data.tree")
+citation("foreach")
+citation("doParallel")
+citation("profvis")
+
+packageVersion("ggplot2")
+packageVersion("GGally")
+packageVersion("dplyr")
+packageVersion("data.tree")
+packageVersion("foreach")
+packageVersion("doParallel")
+packageVersion("profvis")
+```
+
+
+
+```{r}
+set.seed(345)
+options(digits = 10)
+```
+
+# Data generating process (DGP)
+```{r}
+set.seed(345)
+
+n <- 400
+X1 <- rnorm(n, mean = 0, sd = 1)
+X2 <- rnorm(n, mean = 0, sd = 1)
+X3 <- rnorm(n, mean = 0, sd = 1)
+X4 <- rnorm(n, mean = 0, sd = 1)
+X5 <- rnorm(n, mean = 0, sd = 1)
+X6 <- rnorm(n, mean = 0, sd = 1)
+
+# Keeping track of sorted lists
+point_id <- 1:n
+
+features <- cbind(X1, X2, X3, X4, X5, X6)
+
+epsilon <- rnorm(n, mean = 0, sd = 1)
+
+# We copy a DGP from Roy & Larocque (2012)
+Y <- features[,1] + 
+  0.707 * features[,2]^2 + 
+  2* (features[,3] > 0) + 
+  0.873 * log(abs(features[,1])) * features[,3] + 
+  0.894 * features[,2] * features[,4] + 
+  2 * (features[,5] > 0) + 
+  0.464 * exp(1)^features[,6] + 
+  epsilon
+
+DGP1 <- data.frame(point_id, Y, features)
+
+var(DGP1$Y)
+
+# Split the data into 70% training, and 30% test data
+train_proportion <- 0.7
+train_idx <- sample(1:n, size = train_proportion * n, replace = FALSE)
+DGP1_train <- DGP1[train_idx,]
+DGP1_test_df <- DGP1[-train_idx,]
+
+
+X_train <- features[train_idx, ]
+Y_train <- Y[train_idx]
+
+X_test <- features[-train_idx, ]
+Y_test <- Y[-train_idx]
+
+DGP1_test <- list(X = X_test, Y = Y_test)
+DGP1_train_list <- list(X = X_train, Y = Y_train)
+
+
+print(DGP1_train[1:5,])
+print(DGP1_test_df[1:5,])
+```
+
+# Create outliers in training data sets
+```{r}
+shift_data <- function(X, Y, p, type, Y_shift = TRUE, X_shift = FALSE) {
+  # Determine the shift based on the type
+  if (Y_shift & !X_shift) {shiftsize <- p * length(Y)
+  } else if (!Y_shift & X_shift) {shiftsize <- p * length(X)
+  } else if (Y_shift & X_shift) {shiftsize <- p * (length(X)+length(Y))}
+  
+  if (type == "I") {
+    shift <- rep(10, shiftsize)
+  } else if (type == "II") {
+    shift <- rep(20, shiftsize)
+  } else if (type == "III") {
+    shift <- rep(1000, shiftsize)
+  } else if (type == "IV") {
+    shift <- sample(c(-10, 10), size = shiftsize, replace = TRUE)
+  } else {
+    return(list(X = X, Y = Y))
+  }
+
+  
+  # Indices to shift
+  
+  if (Y_shift & !X_shift) {
+    idx <- sample(1:length(Y), size = p * length(Y), replace = FALSE)
+    Y[idx] <- Y[idx] + shift
+    
+  } else if (!Y_shift & X_shift) {
+    idx <- sample(1:length(X), size = p * length(X), replace = FALSE)
+    ts <- n * train_proportion
+    X[idx[idx <= ts],1] <- X[idx[idx <= ts],1] + shift[1:sum(idx<=ts)]
+    X[idx[idx > ts & idx <= 2*ts] - ts,2] <- X[idx[idx > ts & idx <= 2*ts] - ts,2] + shift[(sum(idx<=ts)+1):sum(idx<=2*ts)]
+    X[idx[idx > 2*ts & idx <= 3*ts] - 2*ts,3] <- X[idx[idx > 2*ts & idx <= 3*ts] - 2*ts,3] + shift[(sum(idx<=2*ts)+1):sum(idx<=3*ts)]
+    X[idx[idx > 3*ts & idx <= 4*ts] - 3*ts,4] <- X[idx[idx > 3*ts & idx <= 4*ts] - 3*ts,4] + shift[(sum(idx<=3*ts)+1):sum(idx<=4*ts)]
+    X[idx[idx > 4*ts & idx <= 5*ts] - 4*ts,5] <- X[idx[idx > 4*ts & idx <= 5*ts] - 4*ts,5] + shift[(sum(idx<=4*ts)+1):sum(idx<=5*ts)]
+    X[idx[idx > 5*ts & idx <= 6*ts] - 5*ts,6] <- X[idx[idx > 5*ts & idx <= 6*ts] - 5*ts,6] + shift[(sum(idx<=5*ts)+1):sum(idx<=6*ts)]
+    
+  } else if (Y_shift & X_shift) {
+    idx <- sample(1:(length(X)+length(Y)), size = p * (length(X)+length(Y)), replace = FALSE)
+    ts <- n * train_proportion
+    X[idx[idx <= ts],1] <- X[idx[idx <= ts],1] + shift[1:sum(idx<=ts)]
+    X[idx[idx > ts & idx <= 2*ts] - ts,2] <- X[idx[idx > ts & idx <= 2*ts] - ts,2] + shift[(sum(idx<=ts)+1):sum(idx<=2*ts)]
+    X[idx[idx > 2*ts & idx <= 3*ts] - 2*ts,3] <- X[idx[idx > 2*ts & idx <= 3*ts] - 2*ts,3] + shift[(sum(idx<=2*ts)+1):sum(idx<=3*ts)]
+    X[idx[idx > 3*ts & idx <= 4*ts] - 3*ts,4] <- X[idx[idx > 3*ts & idx <= 4*ts] - 3*ts,4] + shift[(sum(idx<=3*ts)+1):sum(idx<=4*ts)]
+    X[idx[idx > 4*ts & idx <= 5*ts] - 4*ts,5] <- X[idx[idx > 4*ts & idx <= 5*ts] - 4*ts,5] + shift[(sum(idx<=4*ts)+1):sum(idx<=5*ts)]
+    X[idx[idx > 5*ts & idx <= 6*ts] - 5*ts,6] <- X[idx[idx > 5*ts & idx <= 6*ts] - 5*ts,6] + shift[(sum(idx<=5*ts)+1):sum(idx<=6*ts)]
+    Y[idx[idx > 6*ts & idx <= 7*ts] - 6*ts] <- Y[idx[idx > 6*ts & idx <= 7*ts] - 6*ts] + shift[(sum(idx<=6*ts)+1):sum(idx<=7*ts)]
+  }
+
+    return(list(X = X, Y = Y))
+}
+
+# Four lists with shifted data
+proportions <- c(0.00, 0.05, 0.10, 0.15, 0.20, 0.25)
+DGP1_train_I_p <- lapply(proportions, function(p) shift_data(X_train, Y_train, p, "I"))
+DGP1_train_II_p <- lapply(proportions, function(p) shift_data(X_train, Y_train, p, "II"))
+DGP1_train_III_p <- lapply(proportions, function(p) shift_data(X_train, Y_train, p, "III"))
+DGP1_train_IV_p <- lapply(proportions, function(p) shift_data(X_train, Y_train, p, "IV"))
+```
+
+# Histogram Y
+```{r}
+ggplot(DGP1, aes(x = Y)) +
+  geom_histogram(binwidth = 0.3, color = "black", fill = "lightblue") +
+  geom_density(aes(y = after_stat(density * nrow(DGP1) * 0.3)), color = "red", size = 1) +
+  ggtitle("Histogram of Y, with its scaled density curve") +
+  ylab("Count") +
+  theme_minimal()
+```
+
+# Histogram of all shift types training Y
+```{r}
+convert_to_df <- function(data_list, prefix, proportions) {
+  bind_rows(lapply(seq_along(data_list), function(i) {
+    df <- as.data.frame(data_list[[i]]$X)
+    df$Y <- data_list[[i]]$Y
+    df$Shift <- paste0(prefix, "_", proportions[i] * 100, "%")
+    return(df)
+  }))
+}
+
+
+proportions <- c(0.05, 0.10, 0.15, 0.20, 0.25)
+
+# Convert all shift types
+DGP1_train_combined <- bind_rows(
+  convert_to_df(DGP1_train_I_p[2:6], "I", proportions),
+  convert_to_df(DGP1_train_II_p[2:6], "II", proportions),
+  convert_to_df(DGP1_train_III_p[2:6], "III", proportions),
+  convert_to_df(DGP1_train_IV_p[2:6], "IV", proportions)
+)
+
+# Convert 'Shift' into a factor with the desired order
+DGP1_train_combined$Shift <- factor(DGP1_train_combined$Shift, levels = c(
+  "I_5%", "I_10%", "I_15%", "I_20%", "I_25%",
+  "II_5%", "II_10%", "II_15%", "II_20%", "II_25%",
+  "III_5%", "III_10%", "III_15%", "III_20%", "III_25%",
+  "IV_5%", "IV_10%", "IV_15%", "IV_20%", "IV_25%"
+))
+
+# Plot with ggplot2 and facet by 'Shift'
+ggplot(DGP1_train_combined, aes(x = Y)) +
+  geom_histogram(binwidth = 0.3, color = "darkgrey", fill = "lightblue", alpha = 0.7) +
+  geom_density(aes(y = after_stat(density * n * 0.3)), color = "red", size = 0.6) +
+  facet_wrap(~ Shift, ncol = 5) +
+  ggtitle("Histograms of Y with scaled density curves for different shift types. Training data") +
+  ylab("Count") +
+  xlab("Y") +
+  xlim(-10, 30) +
+  theme_minimal()
+```
+
+# GGpairs DGP1
+```{r}
+ggpairs(DGP1)
+```
+
+
+
+# Tree algorithm
+```{r}
+# Recursive function to build the decision tree.
+build_tree_old <- function(node, current_depth, p = max(1,  floor(ncol(features)/3)),
+                       loss_func = "L2", delta = 1.35) {
+
+  # To allow for NULL value in parameter
+  min_samples_node <- ifelse(is.null(min_samples_node), 1, min_samples_node)
+  
+  
+  # Loss function
+  calculate_loss <- function(y_left, y_right, loss_func, delta) {
+    # Least absolute deviations from the median
+    if (loss_func == "L1") {
+      ad_left <- sum(y_left - median(y_left))
+      ad_right <- sum(y_left - median(y_right))
+      return(ad_left + ad_right)
+      
+      # Least squares
+    } else if (loss_func == "L2") {
+      rss_left <- sum((y_left - mean(y_left))^2)
+      rss_right <- sum((y_right - mean(y_right))^2)
+      return(rss_left + rss_right)
+      
+      # Huber loss. Depends on delta. Set standard to 1.35 for standard normal errors
+    } else if (loss_func == "Huber") {
+      huber_loss <- function(y, delta) {
+        residuals = abs(y - mean(y))
+        L1_loss <- delta * (residuals - 0.5 * delta)
+        L2_loss <- 0.5 * residuals^2
+        total_loss <- sum(ifelse(residuals < delta, L2_loss, L1_loss))
+        return(total_loss)
+      }
+      huber_left <- huber_loss(y_left, delta)
+      huber_right <- huber_loss(y_right, delta)
+      return(huber_left + huber_right)
+    }
+  }
+
+  # Function to split the data at a candidate point
+  split_data <- function(data, feature, split_point) {
+    left_data <- data[data[[feature]] < split_point, ]
+    right_data <- data[data[[feature]] >= split_point, ]
+    return(list(left = left_data, right = right_data))
+  }
+  
+  
+  # Check stopping criteria
+  if ((!is.null(min_samples_split) && nrow(node$data) < min_samples_split) || 
+      (!is.null(max_depth) && current_depth >= max_depth)) {
+    node$leaf <- TRUE
+    return()
+  }
+
+  # Initialize df to track potential splits and corresponding loss
+  potential_splits <- data.frame(Feature = character(), Split = numeric(), Loss = numeric())
+  
+  # For p features in the node's data (by standard we have p = #features / 3)
+  for (feature in sample(colnames(features), size = p)) {
+    
+    # Get candidate split points halfway between data points
+    feature_values <- sort(node$data[[feature]])
+    candidate_points <- (head(feature_values, -1) + tail(feature_values, -1)) / 2
+    
+    # Calculate loss for each candidate point
+    for (point in candidate_points) {
+      split <- split_data(node$data, feature, point)
+      
+      # New nodes must contain enough observations
+      if (nrow(split$left) >= min_samples_node & nrow(split$right) >= min_samples_node) {
+        loss <- calculate_loss(split$left$Y, split$right$Y, loss_func, delta)
+        potential_splits <- rbind(potential_splits,
+                                  data.frame(Feature = feature, Split = point, Loss = loss))
+      }
+    }
+  }
+  
+  # If no valid splits found, mark node as a leaf
+  if (nrow(potential_splits) == 0) {
+    node$leaf <- TRUE
+    return()
+  }
+  
+  # Choose the best split
+  best_split <- potential_splits[which.min(potential_splits$Loss), ]
+  
+  # Split the node's data and create child nodes
+  split <- split_data(node$data, best_split$Feature, best_split$Split)
+  
+  # Add attributes
+  node$split_feature <- best_split$Feature
+  node$split_value <- best_split$Split
+  
+  # Create left and right children nodes
+  n <- node$root$totalCount
+  left_child <- node$AddChild(paste("n", n),
+                              data = split$left, loss = best_split$Loss)
+  right_child <- node$AddChild(paste("n", n + 1),
+                              data = split$right, loss = best_split$Loss)
+  
+
+  # Recursively build the tree
+  build_tree(left_child, current_depth + 1, p)
+  build_tree(right_child, current_depth + 1, p)
+}
+```
+
+
+# Optimized tree building algorithm for runtime and memory allocation
+```{r}
+build_tree <- function(node, X, Y, current_depth, p = max(1, floor(ncol(X) / 3)),
+                       loss_func = "L2", delta = 1.35) {
+
+  # Function to split data
+  split_data <- function(X, Y, feature_col, split_point) {
+    left_idx <- X[, feature_col] < split_point
+    right_idx <- !left_idx
+
+    return(list(X_left = X[left_idx, , drop = FALSE], Y_left = Y[left_idx],
+                X_right = X[right_idx, , drop = FALSE], Y_right = Y[right_idx]))
+  }
+
+  # Updated loss calculation function
+  calculate_loss <- function(Y_left, Y_right, loss_func, delta) {
+    if (loss_func == "L1") { # LAD
+      return(sum(abs(Y_left - median(Y_left))) + sum(abs(Y_right - median(Y_right))))
+    } else if (loss_func == "L2") { # LS
+      return(sum((Y_left - mean(Y_left))^2) + sum((Y_right - mean(Y_right))^2))
+    } else if (loss_func == "Huber") { # Huber
+      huber_loss <- function(y, delta) {
+        residuals <- abs(y - mean(y))
+        L1_loss <- delta * (residuals - 0.5 * delta)
+        L2_loss <- 0.5 * residuals^2
+        return(sum(ifelse(residuals < delta, L2_loss, L1_loss)))
+      }
+      return(huber_loss(Y_left, delta) + huber_loss(Y_right, delta))
+    }
+  }
+
+  # Check stopping criterion. Terminal node in case of stop
+  if (nrow(X) < min_samples_split) {
+    node$leaf <- TRUE
+    node$mean <- mean(Y)
+    return()
+  }
+
+  # Initialize split tracker
+  best_loss <- Inf
+  best_split <- NULL
+
+  # Randomly select features
+  selected_features <- sample(1:ncol(X_train), size = p)
+
+  # Find the best split among selected features
+  for (feature in selected_features) {
+    feature_values <- sort(X[, feature])
+    candidate_points <- (head(feature_values, -1) + tail(feature_values, -1)) / 2
+
+    # Check candidate points
+    for (point in candidate_points) {
+      idx_left <- X[, feature] < point
+      idx_right <- !idx_left
+
+      # If the split results in too little child nodes, skip current point
+      if (sum(idx_left) < min_samples_node || sum(idx_right) < min_samples_node) {
+        next
+      }
+
+      # Update loss if necessary
+      loss <- calculate_loss(Y[idx_left], Y[idx_right], loss_func, delta)
+      if (loss < best_loss) {
+        best_loss <- loss
+        best_split <- list(feature = feature, point = point)
+      }
+    }
+  }
+
+  # Check if a split has been found
+  if (!is.null(best_split)) {
+    split <- split_data(X, Y, best_split$feature, best_split$point)
+    node$split_feature <- best_split$feature
+    node$split_value <- best_split$point
+
+    # Create child nodes
+    left_child <- node$AddChild("L")
+    right_child <- node$AddChild("R")
+
+    # Recursively build the tree
+    build_tree(left_child, split$X_left, split$Y_left, current_depth + 1, p, loss_func, delta)
+    build_tree(right_child, split$X_right, split$Y_right, current_depth + 1, p, loss_func, delta)
+    
+    # If no split has been found mark node as terminal node
+  } else {
+    node$leaf <- TRUE
+    node$mean <- mean(Y)
+    return()
+  }
+}
+```
+
+
+
+# Build a tree
+```{r}
+min_samples_split <- 5
+min_samples_node <- 3
+
+set.seed(345)
+
+# Initialize the tree
+reg_tree <- Node$new("Root")
+
+# Start the recursion from the root
+build_tree(reg_tree, X_train, Y_train, current_depth = 0, p = 6)
+```
+
+# print_leaf_nodes(node)
+```{r R.options=list(max.print=10)}
+# Recursive function to print leaf node information
+print_leaf_nodes <- function(node) {
+  if (isLeaf(node)) {
+    cat("Leaf Node:", node$name, "depth:", node$level - 1, "mean:", node$mean, "\n")
+  } else {
+    for (child in node$children) {
+      print_leaf_nodes(child)
+    }
+  }
+}
+
+print_leaf_nodes(reg_tree)
+```
+
+
+# Visualize tree network
+```{r}
+# Simple network
+plot(reg_tree)
+```
+
+
+
+
+# predict_single(), predict_trees()
+```{r}
+# Function to assign a predicted value for an observation, traversing the tree
+predict_single <- function(node, observation, offset = 0) {
+  if (isLeaf(node)) {
+    return(node$mean)
+  } else {
+    # Go to the right (or left, if you will) child node
+    if (observation[[node$split_feature + offset]] < node$split_value) {
+      return(predict_single(node$children[[1]], observation, offset))
+    } else {
+      return(predict_single(node$children[[2]], observation, offset))
+    }
+  }
+}
+
+
+# Function to predict based on several trees. Now only used below
+predict_trees <- function(trees, observation, aggregation = "mean") {
+  predictions <- numeric(length(trees))
+  
+  # Traverse each tree for the observation
+  for (b in 1:length(trees)) {
+    predictions[b] <- predict_single(trees[[b]], observation)
+  }
+  
+  if (aggregation == "mean") {
+    return(mean(predictions))
+  } else if (aggregation == "median") {
+    return(median(predictions))
+  }
+}
+```
+
+
+# Predict based on tree, then measure metrics
+```{r}
+tree_predictions_train <- numeric(nrow(DGP1_train))
+for (i in 1:nrow(DGP1_train)) {
+  tree_predictions_train[i] <- predict_single(reg_tree, DGP1_train[i,], offset = 2)
+}
+
+tree_predictions_test <- numeric(nrow(DGP1_test_df))
+for (i in 1:nrow(DGP1_test_df)) {
+  tree_predictions_test[i] <- predict_single(reg_tree, DGP1_test_df[i,], offset = 2)
+}
+
+
+
+
+# MAE
+cat("\n\n", "Train MAE: ", sum(abs(DGP1_train$Y - tree_predictions_train)) / nrow(DGP1_train))
+cat("\n", "Test MAE: ", sum(abs(DGP1_test_df$Y - tree_predictions_test)) / nrow(DGP1_test_df))
+
+# MSE
+cat("\n\n", "Train R^2: ", 1 - (sum((DGP1_train$Y - tree_predictions_train)^2)) / (sum((DGP1_train$Y - mean(DGP1_train$Y))^2)))
+cat("\n", "Test R^2: ", 1 - (sum((DGP1_test_df$Y - tree_predictions_test)^2)) / (sum((DGP1_test_df$Y - mean(DGP1_test_df$Y))^2)))
+      
+
+```
+
+# Creating the forest
+```{r}
+# Inputs: training data, number of bootstrap samples, bootstrap size, #features for splitting
+# Outputs: a list of trees
+create_forest <- function(X, Y, B, p, loss_func, delta = 1.35) {
+  trees <- vector("list", B)
+  for (b in 1:B) {
+    # Construct bootstrap sample (for now only the size of the original data)
+    idx <- sample(nrow(X), size = nrow(X), replace = TRUE)
+    X_boot <- X[idx, , drop = FALSE]
+    Y_boot <- Y[idx]
+    
+    # Make and grow the tree on the sample, add to list
+    root_node <- Node$new("Root")
+    build_tree(root_node, X_boot, Y_boot, current_depth = 0, p, loss_func, delta = delta)
+    trees[[b]] <- root_node
+  }
+  return(trees)
+}
+
+# Function to train a certain type of forest on the 5 levels of outlier type
+create_forest_onType <- function(zero_forest, train_data, B, p=2, loss_func, delta = 1.35) {
+  forest <- list(zero_forest,
+                create_forest(train_data[[2]]$X, train_data[[2]]$Y, B=B, p=p, loss_func = loss_func, delta = delta),
+                create_forest(train_data[[3]]$X, train_data[[3]]$Y, B=B, p=p, loss_func = loss_func, delta = delta),
+                create_forest(train_data[[4]]$X, train_data[[4]]$Y, B=B, p=p, loss_func = loss_func, delta = delta),
+                create_forest(train_data[[5]]$X, train_data[[5]]$Y, B=B, p=p, loss_func = loss_func, delta = delta),
+                create_forest(train_data[[6]]$X, train_data[[6]]$Y, B=B, p=p, loss_func = loss_func, delta = delta))
+
+  return(forest)
+}
+```
+
+# Creating the forest with parallel processing
+```{r}
+create_forest_parallel <- function(X, Y, B, p, loss_func, delta = 1.35) {
+  num_cores <- parallel::detectCores() - 3
+  cl <- makeCluster(num_cores)
+  registerDoParallel(cl)
+  
+  # Run the loop in parallel
+  trees <- foreach(b = 1:B,
+                   .combine = "c",
+                   .packages = "data.tree",
+                   .export = c("build_tree", "Node", "min_samples_split",
+                               "min_samples_node", "X_train", "Y_train", "p", "loss_func", "delta")
+                   ) %dopar% {
+    idx <- sample(nrow(X), size = nrow(X), replace = TRUE)
+    X_boot <- X[idx, , drop = FALSE]
+    Y_boot <- Y[idx]
+    
+    # Make and grow the tree on the sample
+    root_node <- Node$new("Root")
+    build_tree(root_node, X_boot, Y_boot, current_depth = 0, p, loss_func, delta = delta)
+    list(root_node)
+  }
+  
+  stopCluster(cl)
+  return(trees)
+}
+
+```
+
+
+
+# Creating the forests on uncontaminated training data
+```{r}
+# Set the following to +integer value or NULL
+# Minimum number of observations for a node to be allowed to split
+min_samples_split <- 2
+# Minimum number of observations contained in any node.
+min_samples_node <- 1
+# Maximum depth of the tree
+max_depth <- NULL
+
+B <- 200
+
+RF_LS <- create_forest(X_train, Y_train, B=B, p=2, loss_func = "L2")
+RF_LAD <- create_forest(X_train, Y_train, B=B, p=2, loss_func = "L1")
+RF_H <- create_forest(X_train, Y_train, B=B, p=2, loss_func = "Huber")
+```
+
+```{r}
+# Calculate residuals for LS, LAD, and H predictions
+RF_LS_predictions_test <- numeric(nrow(DGP1_test_df))
+RF_LAD_predictions_test <- numeric(nrow(DGP1_test_df))
+RF_H_predictions_test <- numeric(nrow(DGP1_test_df))
+
+for (i in 1:nrow(DGP1_test_df)) {
+  RF_LS_predictions_test[i] <- predict_trees(RF_LS, DGP1_test_df[i,], "mean")
+  RF_LAD_predictions_test[i] <- predict_trees(RF_LAD, DGP1_test_df[i,], "mean")
+  RF_H_predictions_test[i] <- predict_trees(RF_H, DGP1_test_df[i,], "mean")
+  }
+
+# Calculate residuals
+residuals_LS <- RF_LS_predictions_test - DGP1_test_df$Y
+residuals_LAD <- RF_LAD_predictions_test - DGP1_test_df$Y
+residuals_H <- RF_H_predictions_test - DGP1_test_df$Y
+
+# Combine into a single data frame for plotting
+residuals_df <- data.frame(
+  True_Y = rep(DGP1_test_df$Y, 3),
+  Residuals = c(residuals_LS, residuals_LAD, residuals_H),
+  Model = factor(rep(c("LS", "LAD", "H"), each = nrow(DGP1_test_df)))
+)
+
+# Scatter plot of residuals for LS, LAD, and H
+ggplot(residuals_df, aes(x = True_Y, y = Residuals, color = Model)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  labs(title = "Residuals vs True Y by model", x = "True Y", y = "Residuals", color = "Model") +
+  theme_minimal() +
+  scale_color_manual(values = c("LS" = "blue", "LAD" = "green", "H" = "orange"))  # Customize colors
+
+# Histogram of residuals by model
+ggplot(residuals_df, aes(x = Residuals, fill = Model)) +
+  geom_histogram(binwidth = 0.6, position = "dodge", alpha = 0.3, color = "black") +
+  labs(title = "Distribution of Residuals by Model", x = "Residuals", y = "Frequency", fill = "Model") +
+  theme_minimal() +
+  scale_fill_manual(values = c("LS" = "blue", "LAD" = "green", "H" = "orange"))
+```
+
+
+```{r}
+set.seed(345)
+
+min_samples_split <- 5
+min_samples_node <- 3
+
+
+analyze_residuals <- function(outlier_type, X_train, Y_train, DGP1_test_df, shift_amount = 0.10) {
+  # Shift data based on outlier type
+  shifted_data <- shift_data(X_train, Y_train, shift_amount, outlier_type, Y_shift = TRUE, X_shift = FALSE)
+  X_train_shifted <- shifted_data[[1]]
+  Y_train_shifted <- shifted_data[[2]]
+  
+  # Initialize and build trees
+  tree_LS <- Node$new("Root")
+  build_tree(tree_LS, X_train_shifted, Y_train_shifted, current_depth = 0, p = 6, loss_func = "L2")
+  tree_LAD <- Node$new("Root")
+  build_tree(tree_LAD, X_train_shifted, Y_train_shifted, current_depth = 0, p = 6, loss_func = "L1")
+  tree_H <- Node$new("Root")
+  build_tree(tree_H, X_train_shifted, Y_train_shifted, current_depth = 0, p = 6, loss_func = "Huber")
+  
+  # Predict for test data
+  tree_LS_predictions <- numeric(nrow(DGP1_test_df))
+  tree_LAD_predictions <- numeric(nrow(DGP1_test_df))
+  tree_H_predictions <- numeric(nrow(DGP1_test_df))
+  
+  for (i in 1:nrow(DGP1_test_df)) {
+    tree_LS_predictions[i] <- predict_single(tree_LS, DGP1_test_df[i,])
+    tree_LAD_predictions[i] <- predict_single(tree_LAD, DGP1_test_df[i,])
+    tree_H_predictions[i] <- predict_single(tree_H, DGP1_test_df[i,])
+  }
+  
+  # Calculate residuals
+  tree_residuals_LS <- tree_LS_predictions - DGP1_test_df$Y
+  tree_residuals_LAD <- tree_LAD_predictions - DGP1_test_df$Y
+  tree_residuals_H <- tree_H_predictions - DGP1_test_df$Y
+  
+  # Combine into a single data frame
+  tree_residuals_df <- data.frame(
+    True_Y = rep(DGP1_test_df$Y, 3),
+    Residuals = c(tree_residuals_LS, tree_residuals_LAD, tree_residuals_H),
+    Model = factor(rep(c("LS", "LAD", "H"), each = nrow(DGP1_test_df))),
+    Outlier_Type = outlier_type
+  )
+  
+  return(tree_residuals_df)
+}
+
+# Types of outliers to analyze
+outlier_types <- c("Clean", "I", "II", "III", "IV")
+results_list <- list()
+
+# Loop over outlier types and analyze
+for (type in outlier_types) {
+  if (type == "Clean") {
+    # No shift for clean data
+    results_list[[type]] <- analyze_residuals(type, X_train, Y_train, DGP1_test_df, shift_amount = 0)
+  } else {
+    results_list[[type]] <- analyze_residuals(type, X_train, Y_train, DGP1_test_df, shift_amount = 0.10)
+  }
+}
+
+# Combine all results into a single data frame
+all_residuals_df <- do.call(rbind, results_list)
+
+# Create plots for each outlier type
+scatter_plot <- ggplot(all_residuals_df, aes(x = True_Y, y = Residuals, color = Model)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  facet_wrap(~Outlier_Type, ncol = 2, scales = "free") +
+  labs(title = "Residuals vs True Y by Model and Outlier Type", x = "True Y", y = "Residuals", color = "Model") +
+  theme_minimal() +
+  scale_color_manual(values = c("LS" = "blue", "LAD" = "green", "H" = "orange"))
+
+density_plot <- ggplot(all_residuals_df, aes(x = Residuals, color = Model)) +
+  geom_density(alpha = 0.3, size = 1) +
+  facet_wrap(~Outlier_Type, ncol = 2, scales = "free") +
+  labs(title = "Density of Residuals by model and outlier type. 10% contamination", 
+       x = "Residuals", y = "Density", color = "Model") +
+  theme_minimal() +
+  scale_color_manual(values = c("LS" = "blue", "LAD" = "green", "H" = "orange"))
+
+discrete_pdf_plot <- ggplot(all_residuals_df, aes(x = Residuals, color = Model)) +
+  geom_step(aes(y = ..density..), stat = "bin", binwidth = 0.6, alpha = 0.6, size = 1) +  # Step-wise density
+  facet_wrap(~Outlier_Type, ncol = 2, scales = "free") +
+  labs(title = "Discrete PDF of Residuals by Model and Outlier Type", 
+       x = "Residuals", y = "Density", color = "Model") +
+  theme_minimal() +
+  scale_color_manual(values = c("LS" = "blue", "LAD" = "green", "H" = "orange"))
+
+
+# Display the plots
+print(scatter_plot)
+print(density_plot)
+print(discrete_pdf_plot)
+
+
+```
+```{r}
+all_residuals_df
+```
+
+
+
+
+```{r}
+# Define the function for analyzing residuals with different X and Y shift combinations
+analyze_residuals_shift_combinations <- function(X_train, Y_train, DGP1_test_df, shift_combination, outlier_type = "III") {
+  # Define shift parameters based on combination
+  Y_shift <- shift_combination[1]
+  X_shift <- shift_combination[2]
+  
+  # Shift data based on outlier type
+  shifted_data <- shift_data(X_train, Y_train, p = 0.10, outlier_type, Y_shift = Y_shift, X_shift = X_shift)
+  X_train_shifted <- shifted_data[[1]]
+  Y_train_shifted <- shifted_data[[2]]
+  
+  # Initialize and build trees
+  tree_LS <- Node$new("Root")
+  build_tree(tree_LS, X_train_shifted, Y_train_shifted, current_depth = 0, p = 6, loss_func = "L2")
+  tree_LAD <- Node$new("Root")
+  build_tree(tree_LAD, X_train_shifted, Y_train_shifted, current_depth = 0, p = 6, loss_func = "L1")
+  tree_H <- Node$new("Root")
+  build_tree(tree_H, X_train_shifted, Y_train_shifted, current_depth = 0, p = 6, loss_func = "Huber")
+  
+  # Predict for test data
+  tree_LS_predictions <- numeric(nrow(DGP1_test_df))
+  tree_LAD_predictions <- numeric(nrow(DGP1_test_df))
+  tree_H_predictions <- numeric(nrow(DGP1_test_df))
+  
+  for (i in 1:nrow(DGP1_test_df)) {
+    tree_LS_predictions[i] <- predict_single(tree_LS, DGP1_test_df[i,])
+    tree_LAD_predictions[i] <- predict_single(tree_LAD, DGP1_test_df[i,])
+    tree_H_predictions[i] <- predict_single(tree_H, DGP1_test_df[i,])
+  }
+  
+  # Calculate residuals
+  tree_residuals_LS <- tree_LS_predictions - DGP1_test_df$Y
+  tree_residuals_LAD <- tree_LAD_predictions - DGP1_test_df$Y
+  tree_residuals_H <- tree_H_predictions - DGP1_test_df$Y
+  
+  # Combine into a single data frame
+  tree_residuals_df <- data.frame(
+    True_Y = rep(DGP1_test_df$Y, 3),
+    Residuals = c(tree_residuals_LS, tree_residuals_LAD, tree_residuals_H),
+    Model = factor(rep(c("LS", "LAD", "H"), each = nrow(DGP1_test_df))),
+    Outlier_Type = outlier_type,
+    Shift_Combination = paste("Y_shift =", Y_shift, "| X_shift =", X_shift)
+  )
+  
+  return(tree_residuals_df)
+}
+
+# Define shift combinations (Y_shift, X_shift)
+shift_combinations <- list(
+  c(TRUE, FALSE),  # Y_shift = TRUE, X_shift = FALSE
+  c(FALSE, TRUE),  # Y_shift = FALSE, X_shift = TRUE
+  c(TRUE, TRUE)    # Y_shift = TRUE, X_shift = TRUE
+)
+
+# Analyze residuals for outlier type II and each shift combination
+results_list <- list()
+
+for (shift_combination in shift_combinations) {
+  results_list[[paste(shift_combination, collapse = "_")]] <- analyze_residuals_shift_combinations(
+    X_train, Y_train, DGP1_test_df, shift_combination, outlier_type = "III"
+  )
+}
+
+# Combine all results into a single data frame
+all_residuals_df <- do.call(rbind, results_list)
+
+# Create plots for each shift combination
+scatter_plot <- ggplot(all_residuals_df, aes(x = True_Y, y = Residuals, color = Model)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  facet_wrap(~Shift_Combination, ncol = 1, scales = "free") +
+  labs(title = "Residuals vs True Y by Model and Shift Combination", x = "True Y", y = "Residuals", color = "Model") +
+  theme_minimal() +
+  scale_color_manual(values = c("LS" = "blue", "LAD" = "green", "H" = "orange"))
+
+density_plot <- ggplot(all_residuals_df, aes(x = Residuals, color = Model)) +
+  geom_density(alpha = 0.3, size = 1) +
+  facet_wrap(~Shift_Combination, ncol = 1, scales = "free") +
+  labs(title = "Density of Residuals by Model and Shift Combination", x = "Residuals", y = "Density", color = "Model") +
+  theme_minimal() +
+  scale_color_manual(values = c("LS" = "blue", "LAD" = "green", "H" = "orange"))
+
+discrete_pdf_plot <- ggplot(all_residuals_df, aes(x = Residuals, color = Model)) +
+  geom_step(aes(y = ..density..), stat = "bin", binwidth = 0.6, alpha = 0.6, size = 1) +  # Step-wise density
+  facet_wrap(~Shift_Combination, ncol = 1, scales = "free") +
+  labs(title = "Discrete PDF of Residuals by Model and Shift Combination", x = "Residuals", y = "Density", color = "Model") +
+  theme_minimal() +
+  scale_color_manual(values = c("LS" = "blue", "LAD" = "green", "H" = "orange"))
+
+qq_plot <- ggplot(all_residuals_df, aes(sample = Residuals, color = Model)) +
+  stat_qq(alpha = 0.6) +
+  stat_qq_line(linetype = "dashed", color = "black") +
+  facet_wrap(~Shift_Combination, ncol = 1, scales = "free") +
+  labs(
+    title = "Q-Q Plots of Residuals by Model and Shift Combination",
+    x = "Theoretical Quantiles",
+    y = "Sample Quantiles",
+    color = "Model"
+  ) +
+  theme_minimal() +
+  scale_color_manual(values = c("LS" = "blue", "LAD" = "green", "H" = "orange"))
+
+# Display the plots
+print(scatter_plot)
+print(density_plot)
+print(discrete_pdf_plot)
+print(qq_plot)
+
+```
+
+
+
+
+# RF_LS prediction; APE distribution for insights; Comparing the simple decision tree (using all features), with the RF (using m = p/3 = 2)
+```{r}
+# Predict in the RF 
+RF_LS_predictions_train <- numeric(nrow(DGP1_train))
+for (i in 1:nrow(DGP1_train)) {RF_LS_predictions_train[i] <- predict_trees(RF_LS, DGP1_train[i,], "mean")}
+RF_LS_predictions_test <- numeric(nrow(DGP1_test_df))
+for (i in 1:nrow(DGP1_test_df)) {RF_LS_predictions_test[i] <- predict_trees(RF_LS, DGP1_test_df[i,], "mean")}
+
+
+# Errors for reg_tree
+APE_tree_train <- round((abs(DGP1_train$Y - tree_predictions_train)/DGP1_train$Y * 100), 2)
+APE_tree_test <- round((abs(DGP1_test_df$Y - tree_predictions_test)/DGP1_test_df$Y * 100), 2)
+
+# Errors for RFLS
+APE_RF_LS_train <- round((abs(DGP1_train$Y - RF_LS_predictions_train)/DGP1_train$Y * 100), 2)
+APE_RF_LS_test <- round((abs(DGP1_test_df$Y - RF_LS_predictions_test)/DGP1_test_df$Y * 100), 2)
+
+
+# Collect APE scores from individual tree- and bagged-predictions
+APE_df <- data.frame(
+  Value = c(APE_tree_train, APE_tree_test, APE_RF_LS_train, APE_RF_LS_test),
+  Type = factor(c(rep("APE_tree_train", length(APE_tree_train)),
+                  rep("APE_tree_test", length(APE_tree_test)),
+                  rep("APE_RF_LS_train", length(APE_RF_LS_train)),
+                  rep("APE_RF_LS_test", length(APE_RF_LS_test))))
+)
+
+# 'Wide' plot train data APEs
+ggplot(APE_df[which(APE_df$Type == "APE_RF_LS_train" | APE_df$Type == "APE_tree_train"),],
+       aes(x = Value, fill = Type)) +
+  geom_histogram(alpha = 0.6, position = "identity", bins = 30) +
+  scale_fill_manual(values = c("APE_tree_train" = "green", "APE_RF_LS_train" = "red")) +
+  labs(title = "APE distribution in train set", x = "APE", y = "Count") +
+  theme_minimal()
+
+# 'Zoomed' plot train data APEs
+ggplot(APE_df[which(APE_df$Type == "APE_RF_LS_train" | APE_df$Type == "APE_tree_train"),],
+       aes(x = Value, fill = Type)) +
+  geom_histogram(alpha = 0.6, position = "identity", bins = 30) +
+  scale_fill_manual(values = c("APE_tree_train" = "green", "APE_RF_LS_train" = "red")) +
+  labs(title = "APE distribution in train set", x = "APE", y = "Count") +
+  theme_minimal() +
+  xlim(-100, 100)
+
+# 'Wide' plot test data APEs
+ggplot(APE_df[which(APE_df$Type == "APE_RF_LS_test" | APE_df$Type == "APE_tree_test"),],
+       aes(x = Value, fill = Type)) +
+  geom_histogram(alpha = 0.6, position = "identity", bins = 30) +
+  scale_fill_manual(values = c("APE_tree_test" = "darkgreen", "APE_RF_LS_test" = "darkred")) +
+  labs(title = "APE distribution in test set", x = "APE", y = "Count") +
+  theme_minimal()
+
+# 'Zoomed' plot test data APEs
+ggplot(APE_df[which(APE_df$Type == "APE_RF_LS_test" | APE_df$Type == "APE_tree_test"),],
+       aes(x = Value, fill = Type)) +
+  geom_histogram(alpha = 0.6, position = "identity", bins = 30) +
+  scale_fill_manual(values = c("APE_tree_test" = "darkgreen", "APE_RF_LS_test" = "darkred")) +
+  labs(title = "APE distribution in test set", x = "APE", y = "Count") +
+  theme_minimal() +
+  xlim(-100, 100)
+```
+
+
+```{r}
+# Input: train/test data for comparison. Grown trees, aggregation method, comparison metric of interest
+# Returns single performance metric for a list of trees
+performance_metric <- function(data, trees, agg_method, metric, whole_list = FALSE) {
+  
+  # Initialize a vector to store metric values after each tree is added
+  metric_values <- numeric(length(trees))
+  
+  # Predict observations for all trees and add to matrix
+  predictions <- matrix(NA, nrow = nrow(data$X), ncol = length(trees))
+  
+  for (number in 1:length(trees)) {
+    for (i in 1:nrow(data$X)) {
+      predictions[i,number] <- predict_single(trees[[number]], data$X[i,])
+    }
+    
+    # Construct the ensemble predictions for trees
+    if (agg_method == "median") {
+      forest_prediction <- apply(predictions[, 1:number, drop=FALSE], 1, median)
+    } else if (agg_method == "mean") {
+      forest_prediction <- rowMeans(predictions[, 1:number, drop=FALSE])
+    }
+    
+    # Calculate the chosen metric
+    if (metric == "MAPE") {
+      metric_values[number] <- mean(abs(data$Y - forest_prediction) / data$Y * 100)
+    } else if (metric == "MAE") {
+      metric_values[number] <- mean(abs(data$Y - forest_prediction))
+    } else if (metric == "tMAPE") {
+      metric_values[number] <- mean(abs(data$Y - forest_prediction) / data$Y * 100, trim = 0.05)
+    } else if (metric == "PMSE") {
+      metric_values[number] <- mean((data$Y - forest_prediction)^2)
+    } else if (metric == "RMSE") {
+      metric_values[number] <- sqrt(mean((data$Y - forest_prediction)^2))
+    } else if (metric == "R2") {
+      ssr <- sum((data$Y - forest_prediction)^2)
+      sst <- sum((data$Y - mean(data$Y))^2)
+      metric_values[number] <- 1 - (ssr / sst)
+    }
+  }
+  
+  # If 'whole_list' is TRUE, return the list of metric values for each tree
+  if (whole_list) {
+    return(metric_values)
+  } else {
+    # Otherwise, return the final metric value after all trees have been added
+    return(metric_values[length(trees)])
+  }
+}
+```
+
+
+# Compute the MAE for RFs
+```{r}
+# First compute the vectors keeping track of MAE values over the forest size
+MAE_RF_LS_test <- performance_metric(DGP1_test, RF_LS, "mean", "MAE", whole_list = TRUE)
+MAE_RF_LS_train <- performance_metric(DGP1_train_list, RF_LS, "mean", "MAE", whole_list = TRUE)
+MAE_RF_LAD_test <- performance_metric(DGP1_test, RF_LAD, "mean", "MAE", whole_list = TRUE)
+MAE_RF_LAD_train <- performance_metric(DGP1_train_list, RF_LAD, "mean", "MAE", whole_list = TRUE)
+MAE_RF_H_test <- performance_metric(DGP1_test, RF_H, "mean", "MAE", whole_list = TRUE)
+MAE_RF_H_train <- performance_metric(DGP1_train_list, RF_H, "mean", "MAE", whole_list = TRUE)
+MAE_RF_LS_m_test <- performance_metric(DGP1_test, RF_LS, "median", "MAE", whole_list = TRUE)
+MAE_RF_LS_m_train <- performance_metric(DGP1_train_list, RF_LS, "median", "MAE", whole_list = TRUE)
+MAE_RF_LAD_m_test <- performance_metric(DGP1_test, RF_LAD, "median", "MAE", whole_list = TRUE)
+MAE_RF_LAD_m_train <- performance_metric(DGP1_train_list, RF_LAD, "median", "MAE", whole_list = TRUE)
+MAE_RF_H_m_test <- performance_metric(DGP1_test, RF_H, "median", "MAE", whole_list = TRUE)
+MAE_RF_H_m_train <- performance_metric(DGP1_train_list, RF_H, "median", "MAE", whole_list = TRUE)
+
+# Combine to plot
+MAE_df <- data.frame(B = 1:B, 
+                       MAE_RF_LS_train = MAE_RF_LS_train, 
+                       MAE_RF_LS_test = MAE_RF_LS_test, 
+                       MAE_RF_LAD_train = MAE_RF_LAD_train,
+                       MAE_RF_LAD_test = MAE_RF_LAD_test,
+                       MAE_RF_H_train = MAE_RF_H_train,
+                       MAE_RF_H_test = MAE_RF_H_test,
+                       MAE_RF_LS_m_train = MAE_RF_LS_m_train, 
+                       MAE_RF_LS_m_test = MAE_RF_LS_m_test, 
+                       MAE_RF_LAD_m_train = MAE_RF_LAD_m_train,
+                       MAE_RF_LAD_m_test = MAE_RF_LAD_m_test,
+                       MAE_RF_H_m_train = MAE_RF_H_m_train,
+                       MAE_RF_H_m_test = MAE_RF_H_m_test)
+
+plot_order = c("RFLS: Test set", "RFLAD: Test set", "RFH: Test set",
+               "RFLSm: Test set", "RFLADm: Test set", "RFHm: Test set",
+               "RFLS: Training set", "RFLAD: Training set", "RFH: Training set",
+               "RFLSm: Training set", "RFLADm: Training set", "RFHm: Training set")
+
+# Plot the evaluation metric values
+ggplot(data = MAE_df) +
+  geom_step(aes(x = B, y = MAE_RF_LS_train, color = "RFLS: Training set"), linewidth = 1, alpha = 0.8) +
+  geom_step(aes(x = B, y = MAE_RF_LS_test, color = "RFLS: Test set"), linewidth = 1, alpha = 0.8) +
+  geom_step(aes(x = B, y = MAE_RF_LAD_train, color = "RFLAD: Training set"), linewidth = 1, alpha = 0.8) +
+  geom_step(aes(x = B, y = MAE_RF_LAD_test, color = "RFLAD: Test set"), linewidth = 1, alpha = 0.8) +
+  geom_step(aes(x = B, y = MAE_RF_H_train, color = "RFH: Training set"), linewidth = 1, alpha = 0.8) +
+  geom_step(aes(x = B, y = MAE_RF_H_test, color = "RFH: Test set"), linewidth = 1, alpha = 0.8) +
+  geom_step(aes(x = B, y = MAE_RF_LS_m_train, color = "RFLSm: Training set"), linewidth = 1, alpha = 0.8) +
+  geom_step(aes(x = B, y = MAE_RF_LS_m_test, color = "RFLSm: Test set"), linewidth = 1, alpha = 0.8) +
+  geom_step(aes(x = B, y = MAE_RF_LAD_m_train, color = "RFLADm: Training set"), linewidth = 1, alpha = 0.8) +
+  geom_step(aes(x = B, y = MAE_RF_LAD_m_test, color = "RFLADm: Test set"), linewidth = 1, alpha = 0.8) +
+  geom_step(aes(x = B, y = MAE_RF_H_m_train, color = "RFHm: Training set"), linewidth = 1, alpha = 0.8) +
+  geom_step(aes(x = B, y = MAE_RF_H_m_test, color = "RFHm: Test set"), linewidth = 1, alpha = 0.8) +
+  labs(title = "MAE for predictions in DGP", 
+     x = "Number of trees in RF", 
+     y = "MAE") +
+  theme_minimal() +
+  scale_color_manual(values = c("RFLS: Training set" = "darkred", "RFLS: Test set" = "red",
+                                "RFLAD: Training set" = "darkgreen", "RFLAD: Test set" = "green",
+                                "RFH: Training set" = "purple", "RFH: Test set" = "magenta",
+                                "RFLSm: Training set" = "darkorange", "RFLSm: Test set" = "orange",
+                                "RFLADm: Training set" = "darkblue", "RFLADm: Test set" = "blue",
+                                "RFHm: Training set" = "dimgray", "RFHm: Test set" = "gray"), breaks=plot_order)
+```
+
+# And the R-squared
+```{r}
+# First compute the vectors keeping track of MAE values over the forest size
+R2_RF_LS_test <- performance_metric(DGP1_test, RF_LS, "mean", "R2", whole_list = TRUE)
+R2_RF_LS_train <- performance_metric(DGP1_train_list, RF_LS, "mean", "R2", whole_list = TRUE)
+R2_RF_LAD_test <- performance_metric(DGP1_test, RF_LAD, "mean", "R2", whole_list = TRUE)
+R2_RF_LAD_train <- performance_metric(DGP1_train_list, RF_LAD, "mean", "R2", whole_list = TRUE)
+R2_RF_H_test <- performance_metric(DGP1_test, RF_H, "mean", "R2", whole_list = TRUE)
+R2_RF_H_train <- performance_metric(DGP1_train_list, RF_H, "mean", "R2", whole_list = TRUE)
+R2_RF_LS_m_test <- performance_metric(DGP1_test, RF_LS, "median", "R2", whole_list = TRUE)
+R2_RF_LS_m_train <- performance_metric(DGP1_train_list, RF_LS, "median", "R2", whole_list = TRUE)
+R2_RF_LAD_m_test <- performance_metric(DGP1_test, RF_LAD, "median", "R2", whole_list = TRUE)
+R2_RF_LAD_m_train <- performance_metric(DGP1_train_list, RF_LAD, "median", "R2", whole_list = TRUE)
+R2_RF_H_m_test <- performance_metric(DGP1_test, RF_H, "median", "R2", whole_list = TRUE)
+R2_RF_H_m_train <- performance_metric(DGP1_train_list, RF_H, "median", "R2", whole_list = TRUE)
+
+# Combine to plot
+R2_df <- data.frame(B = 1:B, 
+                       R2_RF_LS_train = R2_RF_LS_train, 
+                       R2_RF_LS_test = R2_RF_LS_test, 
+                       R2_RF_LAD_train = R2_RF_LAD_train,
+                       R2_RF_LAD_test = R2_RF_LAD_test,
+                       R2_RF_H_train = R2_RF_H_train,
+                       R2_RF_H_test = R2_RF_H_test,
+                       R2_RF_LS_m_train = R2_RF_LS_m_train, 
+                       R2_RF_LS_m_test = R2_RF_LS_m_test, 
+                       R2_RF_LAD_m_train = R2_RF_LAD_m_train,
+                       R2_RF_LAD_m_test = R2_RF_LAD_m_test,
+                       R2_RF_H_m_train = R2_RF_H_m_train,
+                       R2_RF_H_m_test = R2_RF_H_m_test)
+
+# Plot the evaluation metric values
+ggplot(data = R2_df) +
+  geom_step(aes(x = B, y = R2_RF_LS_train, color = "RFLS: Training set"), linewidth = 1, alpha = 0.8) +
+  geom_step(aes(x = B, y = R2_RF_LS_test, color = "RFLS: Test set"), linewidth = 1, alpha = 0.8) +
+  geom_step(aes(x = B, y = R2_RF_LAD_train, color = "RFLAD: Training set"), linewidth = 1, alpha = 0.8) +
+  geom_step(aes(x = B, y = R2_RF_LAD_test, color = "RFLAD: Test set"), linewidth = 1, alpha = 0.8) +
+  geom_step(aes(x = B, y = R2_RF_H_train, color = "RFH: Training set"), linewidth = 1, alpha = 0.8) +
+  geom_step(aes(x = B, y = R2_RF_H_test, color = "RFH: Test set"), linewidth = 1, alpha = 0.8) +
+  geom_step(aes(x = B, y = R2_RF_LS_m_train, color = "RFLSm: Training set"), linewidth = 1, alpha = 0.8) +
+  geom_step(aes(x = B, y = R2_RF_LS_m_test, color = "RFLSm: Test set"), linewidth = 1, alpha = 0.8) +
+  geom_step(aes(x = B, y = R2_RF_LAD_m_train, color = "RFLADm: Training set"), linewidth = 1, alpha = 0.8) +
+  geom_step(aes(x = B, y = R2_RF_LAD_m_test, color = "RFLADm: Test set"), linewidth = 1, alpha = 0.8) +
+  geom_step(aes(x = B, y = R2_RF_H_m_train, color = "RFHm: Training set"), linewidth = 1, alpha = 0.8) +
+  geom_step(aes(x = B, y = R2_RF_H_m_test, color = "RFHm: Test set"), linewidth = 1, alpha = 0.8) +
+  labs(title = "R-squared for predictions in DGP", 
+     x = "Number of trees in RF", 
+     y = "R2") +
+  theme_minimal() +
+  scale_color_manual(values = c("RFLS: Training set" = "darkred", "RFLS: Test set" = "red",
+                                "RFLAD: Training set" = "darkgreen", "RFLAD: Test set" = "green",
+                                "RFH: Training set" = "purple", "RFH: Test set" = "magenta",
+                                "RFLSm: Training set" = "darkorange", "RFLSm: Test set" = "orange",
+                                "RFLADm: Training set" = "darkblue", "RFLADm: Test set" = "blue",
+                                "RFHm: Training set" = "dimgray", "RFHm: Test set" = "gray"), breaks=plot_order)
+```
+
+
+```{r}
+pm_list <- function(evaluation_data, forest, agg, metric, test) {
+  if (test) {
+  return(list(performance_metric(evaluation_data, forest[[1]], agg, metric),
+                  performance_metric(evaluation_data, forest[[2]], agg, metric),
+                  performance_metric(evaluation_data, forest[[3]], agg, metric),
+                  performance_metric(evaluation_data, forest[[4]], agg, metric),
+                  performance_metric(evaluation_data, forest[[5]], agg, metric),
+                  performance_metric(evaluation_data, forest[[6]], agg, metric)))
+  } else if (!test) {
+    return(list(performance_metric(evaluation_data[[1]], forest[[1]], agg, metric),
+                  performance_metric(evaluation_data[[2]], forest[[2]], agg, metric),
+                  performance_metric(evaluation_data[[3]], forest[[3]], agg, metric),
+                  performance_metric(evaluation_data[[4]], forest[[4]], agg, metric),
+                  performance_metric(evaluation_data[[5]], forest[[5]], agg, metric),
+                  performance_metric(evaluation_data[[6]], forest[[6]], agg, metric)))
+  }
+}
+
+
+calculate_performance <- function(outlier_type, rf_ls_X, rf_lad_X, rf_h_X, test_data, metric) {
+  # Calculate performance values for different RF types and aggregation methods
+  metricVal_LS <- sapply(pm_list(test_data, rf_ls_X, "mean", metric, TRUE), unlist)
+  metricVal_LAD <- sapply(pm_list(test_data, rf_lad_X, "mean", metric, TRUE), unlist)
+  metricVal_H <- sapply(pm_list(test_data, rf_h_X, "mean", metric, TRUE), unlist)
+  metricVal_LS_m <- sapply(pm_list(test_data, rf_ls_X, "median", metric, TRUE), unlist)
+  metricVal_LAD_m <- sapply(pm_list(test_data, rf_lad_X, "median", metric, TRUE), unlist)
+  metricVal_H_m <- sapply(pm_list(test_data, rf_h_X, "median", metric, TRUE), unlist)
+  
+  # Save percentages
+  percentages <- c(0, 5, 10, 15, 20, 25)
+  
+  # Return as a list for saving or plotting
+  return(list(
+    outlier_type = outlier_type,
+    percentages = percentages,
+    metricVal_LS = metricVal_LS,
+    metricVal_LAD = metricVal_LAD,
+    metricVal_H = metricVal_H,
+    metricVal_LS_m = metricVal_LS_m,
+    metricVal_LAD_m = metricVal_LAD_m,
+    metricVal_H_m = metricVal_H_m,
+    metric_name = metric
+  ))
+}
+```
+
+
+# Run the full simulation
+#1 full run with B = 100 trees takes +1 hour.
+#Change the Y_shift and X_shift Boolean values to choose what to simulate. Careful: also then change the file names for saving.
+#examples: "X_R2_I.rds" for !Y_shift and X_shift. "_R2_I.rds" for Y_shift and !X_shift.
+# When running, the files will be saved with names spanning from \textit{run} up to \textit{run} + \textit{numberofruns} - 1
+```{r}
+# Run that corresponds to new files
+run <- 1
+# Number of runs to run right now
+numberofruns <- 10
+
+# Minimum number of observations for a node to be allowed to split
+min_samples_split <- 2
+# Minimum number of observations contained in any node.
+min_samples_node <- 1
+# Maximum depth of the tree
+max_depth <- NULL
+
+B <- 100
+
+for (iteration in (run):(run+numberofruns-1)) {
+set.seed(344 + iteration)
+print(iteration)
+  
+n <- 400
+X1 <- rnorm(n, mean = 0, sd = 1)
+X2 <- rnorm(n, mean = 0, sd = 1)
+X3 <- rnorm(n, mean = 0, sd = 1)
+X4 <- rnorm(n, mean = 0, sd = 1)
+X5 <- rnorm(n, mean = 0, sd = 1)
+X6 <- rnorm(n, mean = 0, sd = 1)
+
+features <- cbind(X1, X2, X3, X4, X5, X6)
+epsilon <- rnorm(n, mean = 0, sd = 1)
+
+# We copy a DGP from Roy & Larocque (2012)
+Y <- features[,1] + 
+  0.707 * features[,2]^2 + 
+  2* (features[,3] > 0) + 
+  0.873 * log(abs(features[,1])) * features[,3] + 
+  0.894 * features[,2] * features[,4] + 
+  2 * (features[,5] > 0) + 
+  0.464 * exp(1)^features[,6] + 
+  epsilon
+
+
+# Split the data into 70% training, and 30% test data
+train_proportion <- 0.7
+train_idx <- sample(1:n, size = train_proportion * n, replace = FALSE)
+
+X_train <- features[train_idx, ]
+Y_train <- Y[train_idx]
+
+X_test <- features[-train_idx, ]
+Y_test <- Y[-train_idx]
+
+DGP1_test <- list(X = X_test, Y = Y_test)
+
+DGP1_train_I_p <- list(shift_data(X_train, Y_train, 0.00, "I", Y_shift = TRUE, X_shift = FALSE),
+                      shift_data(X_train, Y_train, 0.05, "I", Y_shift = TRUE, X_shift = FALSE),
+                      shift_data(X_train, Y_train, 0.10, "I", Y_shift = TRUE, X_shift = FALSE),
+                      shift_data(X_train, Y_train, 0.15, "I", Y_shift = TRUE, X_shift = FALSE),
+                      shift_data(X_train, Y_train, 0.20, "I", Y_shift = TRUE, X_shift = FALSE),
+                      shift_data(X_train, Y_train, 0.25, "I", Y_shift = TRUE, X_shift = FALSE))
+
+DGP1_train_II_p <- list(shift_data(X_train, Y_train, 0.00, "II", Y_shift = TRUE, X_shift = FALSE),
+                      shift_data(X_train, Y_train, 0.05, "II", Y_shift = TRUE, X_shift = FALSE),
+                      shift_data(X_train, Y_train, 0.10, "II", Y_shift = TRUE, X_shift = FALSE),
+                      shift_data(X_train, Y_train, 0.15, "II", Y_shift = TRUE, X_shift = FALSE),
+                      shift_data(X_train, Y_train, 0.20, "II", Y_shift = TRUE, X_shift = FALSE),
+                      shift_data(X_train, Y_train, 0.25, "II", Y_shift = TRUE, X_shift = FALSE))
+
+DGP1_train_III_p <- list(shift_data(X_train, Y_train, 0.00, "III", Y_shift = TRUE, X_shift = FALSE),
+                      shift_data(X_train, Y_train, 0.05, "III", Y_shift = TRUE, X_shift = FALSE),
+                      shift_data(X_train, Y_train, 0.10, "III", Y_shift = TRUE, X_shift = FALSE),
+                      shift_data(X_train, Y_train, 0.15, "III", Y_shift = TRUE, X_shift = FALSE),
+                      shift_data(X_train, Y_train, 0.20, "III", Y_shift = TRUE, X_shift = FALSE),
+                      shift_data(X_train, Y_train, 0.25, "III", Y_shift = TRUE, X_shift = FALSE))
+
+DGP1_train_IV_p <- list(shift_data(X_train, Y_train, 0.00, "IV", Y_shift = TRUE, X_shift = FALSE),
+                      shift_data(X_train, Y_train, 0.05, "IV", Y_shift = TRUE, X_shift = FALSE),
+                      shift_data(X_train, Y_train, 0.10, "IV", Y_shift = TRUE, X_shift = FALSE),
+                      shift_data(X_train, Y_train, 0.15, "IV", Y_shift = TRUE, X_shift = FALSE),
+                      shift_data(X_train, Y_train, 0.20, "IV", Y_shift = TRUE, X_shift = FALSE),
+                      shift_data(X_train, Y_train, 0.25, "IV", Y_shift = TRUE, X_shift = FALSE))
+
+
+RF_LS <- create_forest_parallel(X_train, Y_train, B=B, p=2, loss_func = "L2")
+RF_LAD <- create_forest_parallel(X_train, Y_train, B=B, p=2, loss_func = "L1")
+RF_H <- create_forest_parallel(X_train, Y_train, B=B, p=2, loss_func = "Huber")
+
+
+RF_LS_I <- create_forest_onType(RF_LS, DGP1_train_I_p, B, loss_func = "L2")
+RF_LAD_I <- create_forest_onType(RF_LAD, DGP1_train_I_p, B, loss_func = "L1")
+RF_H_I <- create_forest_onType(RF_H, DGP1_train_I_p, B, loss_func = "Huber")
+# Calculate all the necessary metrics
+R2_I <- calculate_performance("I", RF_LS_I, RF_LAD_I, RF_H_I, DGP1_test, "R2")
+MAE_I <- calculate_performance("I", RF_LS_I, RF_LAD_I, RF_H_I, DGP1_test, "MAE")
+# Save the metrics as a file
+saveRDS(R2_I, paste0(iteration, "_R2_I.rds"))
+saveRDS(MAE_I, paste0(iteration, "_MAE_I.rds"))
+# Remove the metrics and forests for storage
+rm(R2_I, MAE_I)
+rm(RF_LS_I, RF_LAD_I, RF_H_I)
+
+
+RF_LS_II <- create_forest_onType(RF_LS, DGP1_train_II_p, B, loss_func = "L2")
+RF_LAD_II <- create_forest_onType(RF_LAD, DGP1_train_II_p, B, loss_func = "L1")
+RF_H_II <- create_forest_onType(RF_H, DGP1_train_II_p, B, loss_func = "Huber")
+R2_II <- calculate_performance("II", RF_LS_II, RF_LAD_II, RF_H_II, DGP1_test, "R2")
+MAE_II <- calculate_performance("II", RF_LS_II, RF_LAD_II, RF_H_II, DGP1_test, "MAE")
+saveRDS(R2_II, paste0(iteration, "_R2_II.rds"))
+saveRDS(MAE_II, paste0(iteration, "_MAE_II.rds"))
+rm(R2_II, MAE_II)
+rm(RF_LS_II, RF_LAD_II, RF_H_II)
+
+
+RF_LS_III <- create_forest_onType(RF_LS, DGP1_train_III_p, B, loss_func = "L2")
+RF_LAD_III <- create_forest_onType(RF_LAD, DGP1_train_III_p, B, loss_func = "L1")
+RF_H_III <- create_forest_onType(RF_H, DGP1_train_III_p, B, loss_func = "Huber")
+R2_III <- calculate_performance("III", RF_LS_III, RF_LAD_III, RF_H_III, DGP1_test, "R2")
+MAE_III <- calculate_performance("III", RF_LS_III, RF_LAD_III, RF_H_III, DGP1_test, "MAE")
+saveRDS(R2_III, paste0(iteration, "_R2_III.rds"))
+saveRDS(MAE_III, paste0(iteration, "_MAE_III.rds"))
+rm(R2_III, MAE_III)
+rm(RF_LS_III, RF_LAD_III, RF_H_III)
+
+
+RF_LS_IV <- create_forest_onType(RF_LS, DGP1_train_IV_p, B, loss_func = "L2")
+RF_LAD_IV <- create_forest_onType(RF_LAD, DGP1_train_IV_p, B, loss_func = "L1")
+RF_H_IV <- create_forest_onType(RF_H, DGP1_train_IV_p, B, loss_func = "Huber")
+R2_IV <- calculate_performance("IV", RF_LS_IV, RF_LAD_IV, RF_H_IV, DGP1_test, "R2")
+MAE_IV <- calculate_performance("IV", RF_LS_IV, RF_LAD_IV, RF_H_IV, DGP1_test, "MAE")
+saveRDS(R2_IV, paste0(iteration, "_R2_IV.rds"))
+saveRDS(MAE_IV, paste0(iteration, "_MAE_IV.rds"))
+rm(R2_IV, MAE_IV)
+rm(RF_LS_IV, RF_LAD_IV, RF_H_IV)
+
+# Remove remaining trained forests
+rm(RF_LS, RF_LAD, RF_H)
+}
+```
+
+# Huber delta parameter considerations. Full simulation for three delta values
+```{r}
+# Run that corresponds to new files
+run <- 1
+# Number of runs to run right now
+numberofruns <- 1
+
+# Minimum number of observations for a node to be allowed to split
+min_samples_split <- 2
+# Minimum number of observations contained in any node.
+min_samples_node <- 1
+# Maximum depth of the tree
+max_depth <- NULL
+
+B <- 100
+
+for (iteration in (run):(run+numberofruns-1)) {
+set.seed(344 + iteration)
+
+n <- 400
+X1 <- rnorm(n, mean = 0, sd = 1)
+X2 <- rnorm(n, mean = 0, sd = 1)
+X3 <- rnorm(n, mean = 0, sd = 1)
+X4 <- rnorm(n, mean = 0, sd = 1)
+X5 <- rnorm(n, mean = 0, sd = 1)
+X6 <- rnorm(n, mean = 0, sd = 1)
+
+features <- cbind(X1, X2, X3, X4, X5, X6)
+epsilon <- rnorm(n, mean = 0, sd = 1)
+
+# For now, we copy a DGP from Roy & Larocque (2012)
+Y <- features[,1] + 
+  0.707 * features[,2]^2 + 
+  2* (features[,3] > 0) + 
+  0.873 * log(abs(features[,1])) * features[,3] + 
+  0.894 * features[,2] * features[,4] + 
+  2 * (features[,5] > 0) + 
+  0.464 * exp(1)^features[,6] + 
+  epsilon
+
+
+# Split the data into 70% training, and 30% test data
+train_proportion <- 0.7
+train_idx <- sample(1:n, size = train_proportion * n, replace = FALSE)
+
+X_train <- features[train_idx, ]
+Y_train <- Y[train_idx]
+
+X_test <- features[-train_idx, ]
+Y_test <- Y[-train_idx]
+
+DGP1_test <- list(X = X_test, Y = Y_test)
+
+DGP1_train_I_p <- list(shift_data(X_train, Y_train, 0.00, "I"),
+                      shift_data(X_train, Y_train, 0.05, "I"),
+                      shift_data(X_train, Y_train, 0.10, "I"),
+                      shift_data(X_train, Y_train, 0.15, "I"),
+                      shift_data(X_train, Y_train, 0.20, "I"),
+                      shift_data(X_train, Y_train, 0.25, "I"))
+
+DGP1_train_II_p <- list(shift_data(X_train, Y_train, 0.00, "II"),
+                      shift_data(X_train, Y_train, 0.05, "II"),
+                      shift_data(X_train, Y_train, 0.10, "II"),
+                      shift_data(X_train, Y_train, 0.15, "II"),
+                      shift_data(X_train, Y_train, 0.20, "II"),
+                      shift_data(X_train, Y_train, 0.25, "II"))
+
+DGP1_train_III_p <- list(shift_data(X_train, Y_train, 0.00, "III"),
+                      shift_data(X_train, Y_train, 0.05, "III"),
+                      shift_data(X_train, Y_train, 0.10, "III"),
+                      shift_data(X_train, Y_train, 0.15, "III"),
+                      shift_data(X_train, Y_train, 0.20, "III"),
+                      shift_data(X_train, Y_train, 0.25, "III"))
+
+DGP1_train_IV_p <- list(shift_data(X_train, Y_train, 0.00, "IV"),
+                      shift_data(X_train, Y_train, 0.05, "IV"),
+                      shift_data(X_train, Y_train, 0.10, "IV"),
+                      shift_data(X_train, Y_train, 0.15, "IV"),
+                      shift_data(X_train, Y_train, 0.20, "IV"),
+                      shift_data(X_train, Y_train, 0.25, "IV"))
+
+
+# Train all the necessary forests
+RF_Ha <- create_forest(X_train, Y_train, B=B, p=2, loss_func = "Huber", delta = 0.5)
+RF_Ha_I <- create_forest_onType(RF_Ha, DGP1_train_I_p, B, loss_func = "Huber", delta = 0.5)
+RF_Ha_II <- create_forest_onType(RF_Ha, DGP1_train_II_p, B, loss_func = "Huber", delta = 0.5)
+RF_Ha_III <- create_forest_onType(RF_Ha, DGP1_train_III_p, B, loss_func = "Huber", delta = 0.5)
+RF_Ha_IV <- create_forest_onType(RF_Ha, DGP1_train_IV_p, B, loss_func = "Huber", delta = 0.5)
+
+RF_Hb <- create_forest(X_train, Y_train, B=B, p=2, loss_func = "Huber", delta = 10)
+RF_Hb_I <- create_forest_onType(RF_Hb, DGP1_train_I_p, B, loss_func = "Huber", delta = 10)
+RF_Hb_II <- create_forest_onType(RF_Hb, DGP1_train_II_p, B, loss_func = "Huber", delta = 10)
+RF_Hb_III <- create_forest_onType(RF_Hb, DGP1_train_III_p, B, loss_func = "Huber", delta = 10)
+RF_Hb_IV <- create_forest_onType(RF_Hb, DGP1_train_IV_p, B, loss_func = "Huber", delta = 10)
+
+RF_Hc <- create_forest(X_train, Y_train, B=B, p=2, loss_func = "Huber", delta = 20)
+RF_Hc_I <- create_forest_onType(RF_Hc, DGP1_train_I_p, B, loss_func = "Huber", delta = 20)
+RF_Hc_II <- create_forest_onType(RF_Hc, DGP1_train_II_p, B, loss_func = "Huber", delta = 20)
+RF_Hc_III <- create_forest_onType(RF_Hc, DGP1_train_III_p, B, loss_func = "Huber", delta = 20)
+RF_Hc_IV <- create_forest_onType(RF_Hc, DGP1_train_IV_p, B, loss_func = "Huber", delta = 20)
+
+
+# Calculate all the necessary metrics
+H_R2_I <- calculate_performance("I", RF_Ha_I, RF_Hb_I, RF_Hc_I, DGP1_test, "R2")
+H_MAE_I <- calculate_performance("I", RF_Ha_I, RF_Hb_I, RF_Hc_I, DGP1_test, "MAE")
+saveRDS(H_R2_I, paste0(iteration, "H_R2_I.rds"))
+saveRDS(H_MAE_I, paste0(iteration, "H_MAE_I.rds"))
+rm(H_R2_I, H_MAE_I)
+rm(RF_Ha_I, RF_Hb_I, RF_Hc_I)
+
+H_R2_II <- calculate_performance("II", RF_Ha_II, RF_Hb_II, RF_Hc_II, DGP1_test, "R2")
+H_MAE_II <- calculate_performance("II", RF_Ha_II, RF_Hb_II, RF_Hc_II, DGP1_test, "MAE")
+saveRDS(H_R2_II, paste0(iteration, "H_R2_II.rds"))
+saveRDS(H_MAE_II, paste0(iteration, "H_MAE_II.rds"))
+rm(H_R2_II, H_MAE_II)
+rm(RF_Ha_II, RF_Hb_II, RF_Hc_II)
+
+H_R2_III <- calculate_performance("III", RF_Ha_III, RF_Hb_III, RF_Hc_III, DGP1_test, "R2")
+H_MAE_III <- calculate_performance("III", RF_Ha_III, RF_Hb_III, RF_Hc_III, DGP1_test, "MAE")
+saveRDS(H_R2_III, paste0(iteration, "H_R2_III.rds"))
+saveRDS(H_MAE_III, paste0(iteration, "H_MAE_III.rds"))
+rm(H_R2_III, H_MAE_III)
+rm(RF_Ha_III, RF_Hb_III, RF_Hc_III)
+
+H_R2_IV <- calculate_performance("IV", RF_Ha_IV, RF_Hb_IV, RF_Hc_IV, DGP1_test, "R2")
+H_MAE_IV <- calculate_performance("IV", RF_Ha_IV, RF_Hb_IV, RF_Hc_IV, DGP1_test, "MAE")
+saveRDS(H_R2_IV, paste0(iteration, "H_R2_IV.rds"))
+saveRDS(H_MAE_IV, paste0(iteration, "H_MAE_IV.rds"))
+rm(H_R2_IV, H_MAE_IV)
+rm(RF_Ha_IV, RF_Hb_IV, RF_Hc_IV)
+
+# Remove remaining trained forests
+rm(RF_Ha, RF_Hb, RF_Hc)
+
+print(toString(iteration))
+}
+ 
+```
+
+
+```{r}
+plot_performance <- function(performance_data, zero_line = FALSE, huber = FALSE) {
+  if (!huber) {
+    models <- c("RF_LS", "RF_LAD", "RF_H", "RF_LS_m", "RF_LAD_m", "RF_H_m")
+  } else {
+    models <- c("RF_H0.5", "RF_H10", "RF_H20", "RF_H_m0.5", "RF_H_m10", "RF_H_m20")
+  }
+  
+  # Extract data
+  percentages <- performance_data$percentages
+  metric <- performance_data$metric_name
+  
+  # Create a data frame for ggplot
+  plot_data <- data.frame(
+    Percentage = percentages,
+    metricVal_LS = performance_data$metricVal_LS,
+    metricVal_LAD = performance_data$metricVal_LAD,
+    metricVal_H = performance_data$metricVal_H,
+    metricVal_LS_m = performance_data$metricVal_LS_m,
+    metricVal_LAD_m = performance_data$metricVal_LAD_m,
+    metricVal_H_m = performance_data$metricVal_H_m
+  )
+  
+  # Define color mapping as a named vector
+  color_mapping <- setNames(
+    c("blue", "red", "green", "blue", "red", "green"),
+    models
+  )
+  
+  # Generate the plot
+  p <- ggplot(plot_data, aes(x = Percentage)) +
+    geom_line(aes(y = metricVal_LS, color = models[1], linetype = "Mean aggregation"), size = 1) +
+    geom_point(aes(y = metricVal_LS, color = models[1]), size = 2) +
+    geom_line(aes(y = metricVal_LAD, color = models[2], linetype = "Mean aggregation"), size = 1) +
+    geom_point(aes(y = metricVal_LAD, color = models[2]), size = 2) +
+    geom_line(aes(y = metricVal_H, color = models[3], linetype = "Mean aggregation"), size = 1) +
+    geom_point(aes(y = metricVal_H, color = models[3]), size = 2) +
+    geom_line(aes(y = metricVal_LS_m, color = models[4], linetype = "Median aggregation"), size = 1) +
+    geom_point(aes(y = metricVal_LS_m, color = models[4]), size = 2) +
+    geom_line(aes(y = metricVal_LAD_m, color = models[5], linetype = "Median aggregation"), size = 1) +
+    geom_point(aes(y = metricVal_LAD_m, color = models[5]), size = 2) +
+    geom_line(aes(y = metricVal_H_m, color = models[6], linetype = "Median aggregation"), size = 1) +
+    geom_point(aes(y = metricVal_H_m, color = models[6]), size = 2) +
+    
+    labs(title = paste("Performance of RFs Trained on Outlier Type", performance_data$outlier_type),
+         x = "Percentage of Outliers", y = metric,
+         color = "Model Type", linetype = "Line Type") +
+    
+    scale_color_manual(values = color_mapping) +
+    scale_linetype_manual(values = c("Median aggregation" = "twodash", "Mean aggregation" = "solid")) +
+    theme_minimal()
+  
+  if (zero_line) {
+    p <- p + geom_hline(yintercept = 0, color = "darkgrey", linetype = "dotted", size = 0.8)
+  }
+  
+  return(p)
+}
+
+```
+
+
+# Calculate and plot average results of the files created. Change vaues
+```{r}
+results_mean <- function(start, end, URL) {
+  list_metric_type <- lapply(paste0(start:end, URL), readRDS)
+  mean_metric_type <- list_metric_type[[1]]
+  
+  entry_names <- c("metricVal_LS", "metricVal_LAD", "metricVal_H", 
+                   "metricVal_LS_m", "metricVal_LAD_m", "metricVal_H_m")
+  for (name in entry_names) {mean_metric_type[[name]] <- c(0, 0, 0, 0, 0, 0)}
+  for (i in seq_along(list_metric_type)) {
+    for (name in entry_names) {
+      mean_metric_type[[name]] <- mean_metric_type[[name]] + list_metric_type[[i]][[name]] / length(list_metric_type)
+    }
+  }
+  return(mean_metric_type)
+}
+
+# Change here the parameters to the file number range in the workspace folder.
+mean_R2_I <- results_mean(1, 66, "_R2_I.rds")
+mean_R2_II <- results_mean(1, 66, "_R2_II.rds")
+mean_R2_III <- results_mean(1, 66, "_R2_III.rds")
+mean_R2_IV <- results_mean(1, 66, "_R2_IV.rds")
+mean_MAE_I <- results_mean(1, 66, "_MAE_I.rds")
+mean_MAE_II <- results_mean(1, 66, "_MAE_II.rds")
+mean_MAE_III <- results_mean(1, 66, "_MAE_III.rds")
+mean_MAE_IV <- results_mean(1, 66, "_MAE_IV.rds")
+
+p1 <- plot_performance(mean_R2_I, zero_line = TRUE)
+p2 <- plot_performance(mean_R2_II, zero_line = TRUE)
+p3 <- plot_performance(mean_R2_III, zero_line = TRUE)
+p4 <- plot_performance(mean_R2_IV, zero_line = TRUE)
+p5 <- plot_performance(mean_MAE_I)
+p6 <- plot_performance(mean_MAE_II)
+p7 <- plot_performance(mean_MAE_III)
+p8 <- plot_performance(mean_MAE_IV)
+
+p1
+p2
+p3
+p4
+p5
+p6
+p7
+p8
+```
+
+# Huber results
+```{r}
+mean_H_R2_I <- results_mean(1, 20, "H_R2_I.rds")
+mean_H_R2_II <- results_mean(1, 20, "H_R2_II.rds")
+mean_H_R2_III <- results_mean(1, 20, "H_R2_III.rds")
+mean_H_R2_IV <- results_mean(1, 20, "H_R2_IV.rds")
+mean_H_MAE_I <- results_mean(1, 20, "H_MAE_I.rds")
+mean_H_MAE_II <- results_mean(1, 20, "H_MAE_II.rds")
+mean_H_MAE_III <- results_mean(1, 20, "H_MAE_III.rds")
+mean_H_MAE_IV <- results_mean(1, 20, "H_MAE_IV.rds")
+
+p1 <- plot_performance(mean_H_R2_I, TRUE, huber=TRUE)
+p2 <- plot_performance(mean_H_R2_II, TRUE, huber=TRUE)
+p3 <- plot_performance(mean_H_R2_III, TRUE, huber=TRUE)
+p4 <- plot_performance(mean_H_R2_IV, TRUE, huber=TRUE)
+p5 <- plot_performance(mean_H_MAE_I, huber=TRUE)
+p6 <- plot_performance(mean_H_MAE_II, huber=TRUE)
+p7 <- plot_performance(mean_H_MAE_III, huber=TRUE)
+p8 <- plot_performance(mean_H_MAE_IV, huber=TRUE)
+
+p1
+p2
+p3
+p4
+p5
+p6
+p7
+p8
+```
+
+```{r}
+print_results <- function(df) {
+results <- data.frame("0%" = df[[3]], "5%" = df[[4]], "10%" = df[[5]],
+                      "15%" = df[[6]], "20%" = df[[7]], "25%" = df[[8]])
+results <- t(results)
+colnames(results) <- c("0%", "5%", "10%", "15%", "20%", "25%")
+rownames(results) <- c("RFLS", "RFLAD", "RFH", "RFLSm", "RFLADm", "RFLHm")
+
+
+results2 <- results
+for (col in 1:ncol(results)) {
+  results2[, col] <- ((results[, col] - results[, "0%"]) / results[, "0%"]) * 100
+}
+results2 <- results2[, -1]
+
+results <- round(results, 2)
+results2 <- round(results2, 2)
+
+results <- t(results)
+results2 <- t(results2)
+
+
+cat("\n", df$outlier_type, df$metric_name)
+cat("\nMetric values:\n")
+print(results)
+cat("Percentage change wrt 0%:\n")
+print(results2)
+}
+
+print_results(mean_MAE_I)
+print_results(mean_MAE_II)
+print_results(mean_MAE_III)
+print_results(mean_MAE_IV)
+print_results(mean_R2_I)
+print_results(mean_R2_II)
+print_results(mean_R2_III)
+print_results(mean_R2_IV)
+```
+```{r}
+
+```
+
+
+
